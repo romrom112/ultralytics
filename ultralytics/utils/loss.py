@@ -157,17 +157,17 @@ class KeypointLoss(nn.Module):
 class v8DetectionLoss:
     """Criterion class for computing training losses."""
 
-    def __init__(self, model, tal_topk=10):  # model must be de-paralleled
+    def __init__(self, model, head, tal_topk=10):  # model must be de-paralleled
         """Initializes v8DetectionLoss with the model, defining model-related properties and BCE loss function."""
         device = next(model.parameters()).device  # get model device
         h = model.args  # hyperparameters
 
-        m = model.model[-1]  # Detect() module
+        m = head
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
         self.hyp = h
         self.stride = m.stride  # model strides
-        self.nc = m.nc  # number of classes
-        self.no = m.nc + m.reg_max * 4
+        self.nc = head.nc
+        self.no = m.no
         self.reg_max = m.reg_max
         self.device = device
 
@@ -223,6 +223,10 @@ class v8DetectionLoss:
         # Targets
         targets = torch.cat((batch["batch_idx"].view(-1, 1), batch["cls"].view(-1, 1), batch["bboxes"]), 1)
         targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
+        # TODO: hack
+        if targets.size(1) == 0:  # Check if targets is empty
+            return loss.sum() * batch_size, loss.detach()  # Return zero loss if no targets
+
         gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
         mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
 
@@ -730,10 +734,10 @@ class v8OBBLoss(v8DetectionLoss):
 class E2EDetectLoss:
     """Criterion class for computing training losses."""
 
-    def __init__(self, model):
+    def __init__(self, model, head):
         """Initialize E2EDetectLoss with one-to-many and one-to-one detection losses using the provided model."""
-        self.one2many = v8DetectionLoss(model, tal_topk=10)
-        self.one2one = v8DetectionLoss(model, tal_topk=1)
+        self.one2many = v8DetectionLoss(model, tal_topk=10, head=head)
+        self.one2one = v8DetectionLoss(model, tal_topk=1, head=head)
 
     def __call__(self, preds, batch):
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""

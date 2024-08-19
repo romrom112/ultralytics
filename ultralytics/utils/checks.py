@@ -691,7 +691,7 @@ def check_amp(model):
     LOGGER.info(f"{prefix}running Automatic Mixed Precision (AMP) checks with YOLO11n...")
     warning_msg = "Setting 'amp=True'. If you experience zero-mAP or NaN losses you can disable AMP with amp=False."
     try:
-        from ultralytics import YOLO
+        from ultralytics.models import YOLO
 
         assert amp_allclose(YOLO("yolo11n.pt"), im)
         LOGGER.info(f"{prefix}checks passed ✅")

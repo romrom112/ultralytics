@@ -458,7 +458,7 @@ class AutoBackend(nn.Module):
 
         # PyTorch
         if self.pt or self.nn_module:
-            y = self.model(im, augment=augment, visualize=visualize, embed=embed)
+            y = self.model(im, augment=augment, visualize=visualize, embed=embed, return_multiple_heads=True)
 
         # TorchScript
         elif self.jit:

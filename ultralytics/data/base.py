@@ -344,3 +344,7 @@ class BaseDataset(Dataset):
             ```
         """
         raise NotImplementedError
+
+    def shuffle(self):
+        random.shuffle(self.labels)
+        return self

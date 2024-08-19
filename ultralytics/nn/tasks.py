@@ -7,6 +7,7 @@ import types
 from copy import deepcopy
 from pathlib import Path
 
+import numpy
 import torch
 import torch.nn as nn
 
@@ -111,7 +112,7 @@ class BaseModel(nn.Module):
             return self.loss(x, *args, **kwargs)
         return self.predict(x, *args, **kwargs)
 
-    def predict(self, x, profile=False, visualize=False, augment=False, embed=None):
+    def predict(self, x, profile=False, visualize=False, augment=False, embed=None, return_multiple_heads=False):
         """
         Perform a forward pass through the network.
 
@@ -127,36 +128,9 @@ class BaseModel(nn.Module):
         """
         if augment:
             return self._predict_augment(x)
-        return self._predict_once(x, profile, visualize, embed)
+        return self._predict_once(x, profile, visualize, embed, return_multiple_heads)
 
-    def _predict_once(self, x, profile=False, visualize=False, embed=None):
-        """
-        Perform a forward pass through the network.
 
-        Args:
-            x (torch.Tensor): The input tensor to the model.
-            profile (bool):  Print the computation time of each layer if True, defaults to False.
-            visualize (bool): Save the feature maps of the model if True, defaults to False.
-            embed (list, optional): A list of feature vectors/embeddings to return.
-
-        Returns:
-            (torch.Tensor): The last output of the model.
-        """
-        y, dt, embeddings = [], [], []  # outputs
-        for m in self.model:
-            if m.f != -1:  # if not from previous layer
-                x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
-            if profile:
-                self._profile_one_layer(m, x, dt)
-            x = m(x)  # run
-            y.append(x if m.i in self.save else None)  # save output
-            if visualize:
-                feature_visualization(x, m.type, m.i, save_dir=visualize)
-            if embed and m.i in embed:
-                embeddings.append(nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))  # flatten
-                if m.i == max(embed):
-                    return torch.unbind(torch.cat(embeddings, 1), dim=0)
-        return x
 
     def _predict_augment(self, x):
         """Perform augmentations on input image x and return augmented inference."""
@@ -286,22 +260,78 @@ class BaseModel(nn.Module):
             batch (dict): Batch to compute loss on
             preds (torch.Tensor | List[torch.Tensor]): Predictions.
         """
-        if getattr(self, "criterion", None) is None:
-            self.criterion = self.init_criterion()
+        if not hasattr(self, "criterions"):
+            self.criterions = {}
+            for head_name, head in self.heads.items():
+                self.criterions[head_name] = self.init_criterion(head)
+            self.criterions = dict(sorted(self.criterions.items()))
 
-        preds = self.forward(batch["img"]) if preds is None else preds
-        return self.criterion(preds, batch)
+        preds = self.forward(batch["img"], return_multiple_heads=True) if preds is None else preds
+        all_loss_items = []
+        total_loss = 0
+
+
+        for head_name, criterion in self.criterions.items():
+
+            preds_for_head = preds[head_name]
+            indicies_for_head_name = numpy.array(batch["head_name"]) == head_name
+            indices = numpy.where(indicies_for_head_name)[0]
+            if isinstance(preds_for_head, dict):
+                preds_for_head = {key: [tensor[indices] for tensor in preds_for_head[key]] for key in preds_for_head}
+            else:
+                preds_for_head = [tensor[indices] for tensor in preds[head_name]]
+
+            indices = [i for i, value in enumerate(indicies_for_head_name) if value]
+            if not indices:
+                all_loss_items.extend(torch.zeros(3))
+                continue
+            loss, loss_items = criterion(preds_for_head, filter_batch(batch, indices))
+            total_loss += loss / len(self.criterions)
+            all_loss_items.extend(loss_items)
+        return total_loss, torch.tensor(all_loss_items)
 
     def init_criterion(self):
         """Initialize the loss criterion for the BaseModel."""
         raise NotImplementedError("compute_loss() needs to be implemented by task heads")
 
 
+def filter_batch(data, indices):
+    # Directly filterable properties
+    keys = data.keys()
+    filtered_data = {key: [data[key][i] for i in indices] for key in keys if key not in ["bboxes", "cls", "batch_idx"]}
+
+    # Prepare for one-to-many relation filtering
+    # Initialize new lists for bboxes and cls
+    filtered_data['bboxes'] = []
+    filtered_data['cls'] = []
+    # 'batch_idx' needs to be updated based on filtered indices
+    filtered_data['batch_idx'] = []
+
+    # Mapping from old to new indices
+    idx_map = {old_idx: new_idx for new_idx, old_idx in enumerate(indices)}
+
+    # Filter and update one-to-many related properties
+    for idx, batch_idx in enumerate(data['batch_idx']):
+        if batch_idx.item() in idx_map:
+            filtered_data['bboxes'].append(data['bboxes'][idx])
+            filtered_data['cls'].append(data['cls'][idx])
+            # Update batch_idx to reflect new indices
+            filtered_data['batch_idx'].append(idx_map[batch_idx.item()])
+
+    # Convert lists to the original type if needed (e.g., tensors)
+    filtered_data['bboxes'] = torch.stack(filtered_data['bboxes']) if filtered_data['bboxes'] else torch.tensor([])
+    filtered_data['cls'] = torch.stack(filtered_data['cls']) if filtered_data['cls'] else torch.tensor([])
+    filtered_data['batch_idx'] = torch.tensor(filtered_data['batch_idx']) if filtered_data['batch_idx'] else torch.tensor([])
+
+    return filtered_data
+
+
 class DetectionModel(BaseModel):
-    """YOLOv8 detection model."""
 
     def __init__(self, cfg="yolov8n.yaml", ch=3, nc=None, verbose=True):  # model, input channels, number of classes
         """Initialize the YOLOv8 detection model with the given config and parameters."""
+        self.heads = None
+
         super().__init__()
         self.yaml = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)  # cfg dict
         if self.yaml["backbone"][0][2] == "Silence":
@@ -345,6 +375,54 @@ class DetectionModel(BaseModel):
             self.info()
             LOGGER.info("")
 
+    def _predict_once(self, x, profile=False, visualize=False, embed=None, return_multiple_heads=False):
+        """
+        Perform a forward pass through the network.
+
+        Args:
+            x (torch.Tensor): The input tensor to the model.
+            profile (bool):  Print the computation time of each layer if True, defaults to False.
+            visualize (bool): Save the feature maps of the model if True, defaults to False.
+            embed (list, optional): A list of feature vectors/embeddings to return.
+
+        Returns:
+            (torch.Tensor): The last output of the model.
+        """
+        y, dt, embeddings = [], [], []  # outputs
+        if return_multiple_heads:
+            num_of_heads = len(self.heads)
+            models = self.model[:-num_of_heads]
+        else:
+            models = self.model
+        for m in models:
+            if m.f != -1:  # if not from previous layer
+                x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
+            if profile:
+                self._profile_one_layer(m, x, dt)
+            x = m(x)  # run
+            y.append(x if m.i in self.save else None)  # save output
+            if visualize:
+                feature_visualization(x, m.type, m.i, save_dir=visualize)
+            if embed and m.i in embed:
+                embeddings.append(nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))  # flatten
+                if m.i == max(embed):
+                    return torch.unbind(torch.cat(embeddings, 1), dim=0)
+        if not return_multiple_heads:
+            return x
+
+        heads = getattr(self, "heads", None)
+        if not heads:
+            return x
+        embedding = x
+        res = {}
+        for head_name, head in self.heads.items():
+            if head.f != -1:  # if not from previous layer
+                embedding_tag = y[head.f] if isinstance(head.f, int) else [embedding if j == -1 else y[j] for j in head.f]  # from earlier layers
+            else:
+                embedding_tag = embedding
+            res[head_name] = head(embedding_tag)
+        return res
+
     def _predict_augment(self, x):
         """Perform augmentations on input image x and return augmented inference and train outputs."""
         if getattr(self, "end2end", False) or self.__class__.__name__ != "DetectionModel":
@@ -384,9 +462,63 @@ class DetectionModel(BaseModel):
         y[-1] = y[-1][..., i:]  # small
         return y
 
-    def init_criterion(self):
+    def init_criterion(self, head):
         """Initialize the loss criterion for the DetectionModel."""
-        return E2EDetectLoss(self) if getattr(self, "end2end", False) else v8DetectionLoss(self)
+        return E2EDetectLoss(self, head) if getattr(self, "end2end", False) else v8DetectionLoss(self, head)
+
+    def set_heads(self, heads):
+        # self.split_heads_done = False
+        # self.heads=[self.model[-1]]
+        # return
+        # copy detection heads
+        self.model = self.model[:-1]
+        self.heads = {}
+        for head_name, head in heads.items():
+            self.heads[head_name] = head
+            self.model.append(head)
+
+
+    # make sure that calls to half, to, training, etc. are propagated to the heads
+    # def half(self):
+    #     super().half()
+    #     self.model = self.model.half()
+    #     res = []
+    #     for head in self.heads:
+    #         res.append(head.half())
+    #     self.heads = res
+    #     return self
+    #
+    # def to(self, *args, **kwargs):
+    #     super().to(*args, **kwargs)
+    #     self.model = self.model.to(*args, **kwargs)
+    #     res = []
+    #     if not hasattr(self, "heads") or not self.heads:
+    #         return self
+    #     for head in self.heads:
+    #         res.append(head.to(*args, **kwargs))
+    #     self.heads = res
+    #     return self
+    #
+    # def train(self, mode=True):
+    #     super().train(mode)
+    #     self.model.train(mode)
+    #     if not hasattr(self, "heads") or not self.heads:
+    #         return self
+    #     for head in self.heads:
+    #         head.train(mode)
+    #     return self
+    #
+    # def eval(self):
+    #     super().eval()
+    #     self.model.eval()
+    #     if not hasattr(self, "heads") or not self.heads:
+    #         return self
+    #     for head in self.heads:
+    #         head.eval()
+    #     return self
+
+
+
 
 
 class OBBModel(DetectionModel):

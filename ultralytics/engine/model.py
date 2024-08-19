@@ -285,6 +285,7 @@ class Model(nn.Module):
             self.model, self.ckpt = attempt_load_one_weight(weights)
             self.task = self.model.args["task"]
             self.overrides = self.model.args = self._reset_ckpt_args(self.model.args)
+            del self.overrides["imgsz"]
             self.ckpt_path = self.model.pt_path
         else:
             weights = checks.check_file(weights)  # runs in all cases, not redundant with above call
@@ -372,7 +373,6 @@ class Model(nn.Module):
         """
         self._check_is_pytorch_model()
         if isinstance(weights, (str, Path)):
-            self.overrides["pretrained"] = weights  # remember the weights for DDP training
             weights, self.ckpt = attempt_load_one_weight(weights)
         self.model.load(weights)
         return self

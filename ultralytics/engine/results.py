@@ -227,9 +227,8 @@ class Results(SimpleClass):
         ...     result.save(filename="result.jpg")  # Save annotated image
     """
 
-    def __init__(
-        self, orig_img, path, names, boxes=None, masks=None, probs=None, keypoints=None, obb=None, speed=None
-    ) -> None:
+    def __init__(self, orig_shape, path, names, boxes=None, masks=None, probs=None, keypoints=None, obb=None,
+                 transformed_boxes=None, transformed_shape=None) -> None:
         """
         Initialize the Results class for storing and manipulating inference results.
 
@@ -257,18 +256,19 @@ class Results(SimpleClass):
             9: Left Wrist, 10: Right Wrist, 11: Left Hip, 12: Right Hip
             13: Left Knee, 14: Right Knee, 15: Left Ankle, 16: Right Ankle
         """
-        self.orig_img = orig_img
-        self.orig_shape = orig_img.shape[:2]
+        self.orig_shape = orig_shape
         self.boxes = Boxes(boxes, self.orig_shape) if boxes is not None else None  # native size boxes
         self.masks = Masks(masks, self.orig_shape) if masks is not None else None  # native size or imgsz masks
         self.probs = Probs(probs) if probs is not None else None
         self.keypoints = Keypoints(keypoints, self.orig_shape) if keypoints is not None else None
         self.obb = OBB(obb, self.orig_shape) if obb is not None else None
-        self.speed = speed if speed is not None else {"preprocess": None, "inference": None, "postprocess": None}
+        self.transformed_shape = transformed_shape
+        self.transformed_boxes = Boxes(transformed_boxes, transformed_shape) if transformed_boxes is not None else None
+        self.speed = {"preprocess": None, "inference": None, "postprocess": None}  # milliseconds per image
         self.names = names
         self.path = path
         self.save_dir = None
-        self._keys = "boxes", "masks", "probs", "keypoints", "obb"
+        self._keys = "boxes", "masks", "probs", "keypoints", "obb", "transformed_boxes"
 
     def __getitem__(self, idx):
         """

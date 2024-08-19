@@ -21,8 +21,8 @@ import torch
 from torch import distributed as dist
 from torch import nn, optim
 
-from ultralytics.cfg import get_cfg, get_save_dir
-from ultralytics.data.utils import check_cls_dataset, check_det_dataset
+from ultralytics.cfg import get_cfg
+from ultralytics.data.utils import check_det_dataset
 from ultralytics.nn.tasks import attempt_load_one_weight, attempt_load_weights
 from ultralytics.utils import (
     DEFAULT_CFG,
@@ -32,9 +32,7 @@ from ultralytics.utils import (
     TQDM,
     __version__,
     callbacks,
-    clean_url,
     colorstr,
-    emojis,
     yaml_save,
 )
 from ultralytics.utils.autobatch import check_train_batch_size
@@ -54,6 +52,9 @@ from ultralytics.utils.torch_utils import (
     torch_distributed_zero_first,
 )
 
+
+def get_training_output_dir():
+    return os.path.join(os.environ["DATA_DIR"], "models_training", "detection_yolo8")
 
 class BaseTrainer:
     """
@@ -100,15 +101,14 @@ class BaseTrainer:
         """
         self.args = get_cfg(cfg, overrides)
         self.check_resume(overrides)
-        self.device = select_device(self.args.device, self.args.batch)
+        self.device = select_device("cuda:0", self.args.batch)
         self.validator = None
         self.metrics = None
         self.plots = {}
         init_seeds(self.args.seed + 1 + RANK, deterministic=self.args.deterministic)
 
-        # Dirs
-        self.save_dir = get_save_dir(self.args)
-        self.args.name = self.save_dir.name  # update name for loggers
+        self.args.save_dir = os.path.join(get_training_output_dir(), self.args.name)
+        self.save_dir = Path(self.args.save_dir)
         self.wdir = self.save_dir / "weights"  # weights dir
         if RANK in {-1, 0}:
             self.wdir.mkdir(parents=True, exist_ok=True)  # make dir
@@ -129,8 +129,10 @@ class BaseTrainer:
 
         # Model and Dataset
         self.model = check_model_file_from_stem(self.args.model)  # add suffix, i.e. yolov8n -> yolov8n.pt
-        with torch_distributed_zero_first(LOCAL_RANK):  # avoid auto-downloading dataset multiple times
-            self.trainset, self.testset = self.get_dataset()
+        self.datasets = []
+        for data in self.args.data:
+            self.datasets.append(check_det_dataset(data))
+
         self.ema = None
 
         # Optimization utils init
@@ -288,14 +290,17 @@ class BaseTrainer:
 
         # Dataloaders
         batch_size = self.batch_size // max(world_size, 1)
-        self.train_loader = self.get_dataloader(self.trainset, batch_size=batch_size, rank=LOCAL_RANK, mode="train")
-        if RANK in {-1, 0}:
+        self.train_loader = self.get_dataloader(batch_size=batch_size, rank=RANK, mode="train")
+        if RANK in (-1, 0):
             # Note: When training DOTA dataset, double batch size could get OOM on images with >2000 objects.
-            self.test_loader = self.get_dataloader(
-                self.testset, batch_size=batch_size if self.args.task == "obb" else batch_size * 2, rank=-1, mode="val"
-            )
-            self.validator = self.get_validator()
-            metric_keys = self.validator.metrics.keys + self.label_loss_items(prefix="val")
+
+            self.validators = self.get_validator(batch_size)
+            metric_keys = []
+            for validator in self.validators:
+                metrics = validator.metrics.keys
+                # preprend the name of head
+                metrics = [f"{validator.dataset_name}_{metric}" for metric in metrics]
+                metric_keys += metrics + self.label_loss_items(prefix="val")
             self.metrics = dict(zip(metric_keys, [0] * len(metric_keys)))
             self.ema = ModelEMA(self.model)
             if self.args.plots:
@@ -539,28 +544,6 @@ class BaseTrainer:
         # if self.args.close_mosaic and self.epoch == (self.epochs - self.args.close_mosaic - 1):
         #    (self.wdir / "last_mosaic.pt").write_bytes(serialized_ckpt)  # save mosaic checkpoint
 
-    def get_dataset(self):
-        """
-        Get train, val path from data dict if it exists.
-
-        Returns None if data format is not recognized.
-        """
-        try:
-            if self.args.task == "classify":
-                data = check_cls_dataset(self.args.data)
-            elif self.args.data.split(".")[-1] in {"yaml", "yml"} or self.args.task in {
-                "detect",
-                "segment",
-                "pose",
-                "obb",
-            }:
-                data = check_det_dataset(self.args.data)
-                if "yaml_file" in data:
-                    self.args.data = data["yaml_file"]  # for validating 'yolo train data=url.zip' usage
-        except Exception as e:
-            raise RuntimeError(emojis(f"Dataset '{clean_url(self.args.data)}' error ❌ {e}")) from e
-        self.data = data
-        return data["train"], data.get("val") or data.get("test")
 
     def setup_model(self):
         """Load/create/download model for any task."""
@@ -597,8 +580,15 @@ class BaseTrainer:
 
         The returned dict is expected to contain "fitness" key.
         """
-        metrics = self.validator(self)
-        fitness = metrics.pop("fitness", -self.loss.detach().cpu().numpy())  # use loss as fitness measure if not found
+        metrics = {}
+        fitness_scores = []
+        for validator in self.validators:
+            metrics_for_validator = validator(self)
+            fitness = metrics_for_validator.pop("fitness", -self.loss.detach().cpu().numpy())  # use loss as fitness measure if not found
+            fitness_scores.append(fitness)
+            metrics.update({f"{validator.dataset_name}_{k}": v for k, v in metrics_for_validator.items()})
+
+        fitness = sum(fitness_scores) / len(fitness_scores)
         if not self.best_fitness or self.best_fitness < fitness:
             self.best_fitness = fitness
         return metrics, fitness
@@ -640,7 +630,6 @@ class BaseTrainer:
         """Returns a string describing training progress."""
         return ""
 
-    # TODO: may need to put these following functions into callback
     def plot_training_samples(self, batch, ni):
         """Plots training samples during YOLO training."""
         pass
@@ -671,6 +660,7 @@ class BaseTrainer:
         """Performs final evaluation and validation for object detection YOLO model."""
         ckpt = {}
         for f in self.last, self.best:
+            best_stripped_path = f.with_suffix(".stripped.pt")
             if f.exists():
                 if f is self.last:
                     ckpt = strip_optimizer(f)
@@ -678,7 +668,7 @@ class BaseTrainer:
                     k = "train_results"  # update best.pt train_metrics from last.pt
                     strip_optimizer(f, updates={k: ckpt[k]} if k in ckpt else None)
                     LOGGER.info(f"\nValidating {f}...")
-                    self.validator.args.plots = self.args.plots
+                    # self.validator.args.plots = self.args.plots
                     self.metrics = self.validator(model=f)
                     self.metrics.pop("fitness", None)
                     self.run_callbacks("on_fit_epoch_end")
@@ -693,8 +683,6 @@ class BaseTrainer:
 
                 # Check that resume data YAML exists, otherwise strip to force re-download of dataset
                 ckpt_args = attempt_load_weights(last).args
-                if not Path(ckpt_args["data"]).exists():
-                    ckpt_args["data"] = self.args.data
 
                 resume = True
                 self.args = get_cfg(ckpt_args)
@@ -776,7 +764,8 @@ class BaseTrainer:
                 f"ignoring 'lr0={self.args.lr0}' and 'momentum={self.args.momentum}' and "
                 f"determining best 'optimizer', 'lr0' and 'momentum' automatically... "
             )
-            nc = getattr(model, "nc", 10)  # number of classes
+            # nc = getattr(model, "nc", 10)  # number of classes
+            nc = 7
             lr_fit = round(0.002 * 5 / (4 + nc), 6)  # lr0 fit equation to 6 decimal places
             name, lr, momentum = ("SGD", 0.01, 0.9) if iterations > 10000 else ("AdamW", lr_fit, 0.9)
             self.args.warmup_bias_lr = 0.0  # no higher than 0.01 for Adam

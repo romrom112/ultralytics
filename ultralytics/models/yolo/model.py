@@ -26,12 +26,6 @@ class YOLO(Model):
     def task_map(self):
         """Map head to model, trainer, validator, and predictor classes."""
         return {
-            "classify": {
-                "model": ClassificationModel,
-                "trainer": yolo.classify.ClassificationTrainer,
-                "validator": yolo.classify.ClassificationValidator,
-                "predictor": yolo.classify.ClassificationPredictor,
-            },
             "detect": {
                 "model": DetectionModel,
                 "trainer": yolo.detect.DetectionTrainer,
