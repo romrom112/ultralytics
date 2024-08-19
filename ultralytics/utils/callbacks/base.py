@@ -49,7 +49,7 @@ def on_train_batch_end(trainer):
 
 def on_train_epoch_end(trainer):
     """Called at the end of each training epoch."""
-    pass
+    return trainer.train_loader.dataset.shuffle()
 
 
 def on_fit_epoch_end(trainer):

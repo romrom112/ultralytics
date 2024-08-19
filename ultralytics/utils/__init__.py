@@ -862,6 +862,7 @@ def threaded(func):
 
 
 def set_sentry():
+    return
     """
     Initialize the Sentry SDK for error tracking and reporting. Only used if sentry_sdk package is installed and
     sync=True in settings. Run 'yolo settings' to see and update settings YAML file.
@@ -925,7 +926,7 @@ def set_sentry():
             dsn="https://5ff1556b71594bfea135ff0203a0d290@o4504521589325824.ingest.sentry.io/4504521592406016",
             debug=False,
             traces_sample_rate=1.0,
-            release=__version__,
+            # release=__version__,
             environment="production",  # 'dev' or 'production'
             before_send=before_send,
             ignore_errors=[KeyboardInterrupt, FileNotFoundError],

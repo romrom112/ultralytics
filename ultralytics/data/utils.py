@@ -266,7 +266,8 @@ def check_det_dataset(dataset, autodownload=True):
         (dict): Parsed dataset information and paths.
     """
 
-    file = check_file(dataset)
+    yaml_file_path = os.path.join(os.environ["DATA_DIR"], "detection", dataset, "yolo8.yaml")
+    file = check_file(yaml_file_path)
 
     # Download (optional)
     extract_dir = ""
@@ -277,7 +278,10 @@ def check_det_dataset(dataset, autodownload=True):
 
     # Read YAML
     data = yaml_load(file, append_filename=True)  # dictionary
-
+    # if path is relative, resolve with path of yaml
+    yaml_dir = Path(file).parent
+    if "path" in data and not Path(data["path"]).is_absolute():
+        data["path"] = os.path.join(yaml_dir, data["path"])
     # Checks
     for k in "train", "val":
         if k not in data:

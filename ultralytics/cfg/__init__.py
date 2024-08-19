@@ -297,6 +297,8 @@ def check_cfg(cfg, hard=True):
         - Fraction keys are checked to be within the range [0.0, 1.0].
     """
     for k, v in cfg.items():
+        if k == "conf":
+            continue
         if v is not None:  # None values may be from optional args
             if k in CFG_FLOAT_KEYS and not isinstance(v, (int, float)):
                 if hard:

@@ -258,27 +258,27 @@ class BasePredictor:
 
                 # Postprocess
                 with profilers[2]:
-                    self.results = self.postprocess(preds, im, im0s)
+                    self.results = {head_name: self.postprocess(pred, im, im0s, head_name) for head_name, pred in preds.items()}
                 self.run_callbacks("on_predict_postprocess_end")
 
                 # Visualize, save, write results
-                n = len(im0s)
-                for i in range(n):
-                    self.seen += 1
-                    self.results[i].speed = {
-                        "preprocess": profilers[0].dt * 1e3 / n,
-                        "inference": profilers[1].dt * 1e3 / n,
-                        "postprocess": profilers[2].dt * 1e3 / n,
-                    }
-                    if self.args.verbose or self.args.save or self.args.save_txt or self.args.show:
-                        s[i] += self.write_results(i, Path(paths[i]), im, s)
+                # n = len(im0s)
+                # for i in range(n):
+                #     self.seen += 1
+                #     self.results[i].speed = {
+                #         "preprocess": profilers[0].dt * 1e3 / n,
+                #         "inference": profilers[1].dt * 1e3 / n,
+                #         "postprocess": profilers[2].dt * 1e3 / n,
+                #     }
+                #     if self.args.verbose or self.args.save or self.args.save_txt or self.args.show:
+                #         s[i] += self.write_results(i, Path(paths[i]), im, is_video)
 
                 # Print batch results
                 if self.args.verbose:
                     LOGGER.info("\n".join(s))
 
                 self.run_callbacks("on_predict_batch_end")
-                yield from self.results
+                yield from self.results.items()
 
         # Release assets
         for v in self.vid_writer.values():

@@ -101,6 +101,8 @@ class BaseValidator:
 
         self.plots = {}
         self.callbacks = _callbacks or callbacks.get_default_callbacks()
+        self.head_name = self.dataloader.dataset.data["head_name"]
+        self.dataset_name = self.dataloader.dataset.data["dataset_name"]
 
     @smart_inference_mode()
     def __call__(self, trainer=None, model=None):
@@ -108,10 +110,11 @@ class BaseValidator:
         gets priority).
         """
         self.training = trainer is not None
+        print(f"validating {self.dataset_name} head")
         augment = self.args.augment and (not self.training)
         if self.training:
             self.device = trainer.device
-            self.data = trainer.data
+            # self.data = trainer.data
             self.args.half = self.device.type != "cpu"  # force FP16 val during training
             model = trainer.ema.ema or trainer.model
             model = model.half() if self.args.half else model.float()
@@ -151,7 +154,7 @@ class BaseValidator:
             if not pt:
                 self.args.rect = False
             self.stride = model.stride  # used in get_dataloader() for padding
-            self.dataloader = self.dataloader or self.get_dataloader(self.data.get(self.args.split), self.args.batch)
+            self.dataloader = self.get_dataloader(self.data.get(self.args.split), self.args.batch)
 
             model.eval()
             model.warmup(imgsz=(1 if pt else self.args.batch, 3, imgsz, imgsz))  # warmup
@@ -175,16 +178,19 @@ class BaseValidator:
 
             # Inference
             with dt[1]:
-                preds = model(batch["img"], augment=augment)
+                preds = model(batch["img"], augment=augment, return_multiple_heads=True)
 
+            batch["head_name"] = []
+            for i in range(len(batch["im_file"])):
+                batch["head_name"].append(self.head_name)
             # Loss
-            with dt[2]:
-                if self.training:
-                    self.loss += model.loss(batch, preds)[1]
+            # with dt[2]:
+            #     if self.training:
+            #         self.loss += model.loss(batch, preds)[1]
 
             # Postprocess
             with dt[3]:
-                preds = self.postprocess(preds)
+                preds = self.postprocess(preds[self.head_name])
 
             self.update_metrics(preds, batch)
             if self.args.plots and batch_i < 3:
@@ -200,7 +206,8 @@ class BaseValidator:
         self.run_callbacks("on_val_end")
         if self.training:
             model.float()
-            results = {**stats, **trainer.label_loss_items(self.loss.cpu() / len(self.dataloader), prefix="val")}
+            # **trainer.label_loss_items(self.loss.cpu() / len(self.dataloader), prefix="val")
+            results = {**stats}
             return {k: round(float(v), 5) for k, v in results.items()}  # return results as 5 decimal place floats
         else:
             LOGGER.info(
