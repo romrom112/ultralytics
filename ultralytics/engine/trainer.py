@@ -416,14 +416,8 @@ class BaseTrainer:
                 if RANK in {-1, 0}:
                     loss_length = self.tloss.shape[0] if len(self.tloss.shape) else 1
                     pbar.set_description(
-                        ("%11s" * 2 + "%11.4g" * (2 + loss_length))
-                        % (
-                            f"{epoch + 1}/{self.epochs}",
-                            f"{self._get_memory():.3g}G",  # (GB) GPU memory util
-                            *(self.tloss if loss_length > 1 else torch.unsqueeze(self.tloss, 0)),  # losses
-                            batch["cls"].shape[0],  # batch size, i.e. 8
-                            batch["img"].shape[-1],  # imgsz, i.e 640
-                        )
+                        ("%17s" * 2 + "%17.4g" * (2 + loss_len))
+                        % (f"{epoch + 1}/{self.epochs}", mem, *losses, batch["cls"].shape[0], batch["img"].shape[-1])
                     )
                     self.run_callbacks("on_batch_end")
                     if self.args.plots and ni in self.plot_idx:
@@ -662,11 +656,8 @@ class BaseTrainer:
         for f in self.last, self.best:
             best_stripped_path = f.with_suffix(".stripped.pt")
             if f.exists():
-                if f is self.last:
-                    ckpt = strip_optimizer(f)
-                elif f is self.best:
-                    k = "train_results"  # update best.pt train_metrics from last.pt
-                    strip_optimizer(f, updates={k: ckpt[k]} if k in ckpt else None)
+                strip_optimizer(f, str(best_stripped_path))
+                if f is self.best:
                     LOGGER.info(f"\nValidating {f}...")
                     # self.validator.args.plots = self.args.plots
                     self.metrics = self.validator(model=f)
@@ -685,14 +676,9 @@ class BaseTrainer:
                 ckpt_args = attempt_load_weights(last).args
 
                 resume = True
-                self.args = get_cfg(ckpt_args)
-                self.args.model = self.args.resume = str(last)  # reinstate model
-                for k in (
-                    "imgsz",
-                    "batch",
-                    "device",
-                    "close_mosaic",
-                ):  # allow arg updates to reduce memory or update device on resume
+                # self.args = get_cfg(ckpt_args)
+                self.args.model = str(last)  # reinstate model
+                for k in "imgsz", "batch":  # allow arg updates to reduce memory on resume if crashed due to CUDA OOM
                     if k in overrides:
                         setattr(self.args, k, overrides[k])
 
